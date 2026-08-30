@@ -418,7 +418,7 @@ function buildSlots(): RecipeSlotDef[] {
 // ============================================================
 
 const FR: RecipeLangPack = {
-  name: "Fermeture du portail la nuit",
+  name: "Fermeture automatique de portail en soirée",
   description:
     "S'assure que le portail est fermé pour la nuit, à l'heure choisie — sur une installation dont le seul capteur est un contact de fermeture qui rate parfois la détection.",
   slots: {
@@ -490,7 +490,7 @@ const FR: RecipeLangPack = {
 export function createRecipe(): RecipeDefinition {
   return {
     id: "portal-night-closure",
-    name: "Portal Night Closure",
+    name: "Automatic Evening Portal Closure",
     description:
       "Makes sure the portal is closed for the night, at a chosen hour — on an installation whose only sensor is a closed-contact that sometimes misses the closure.",
     slots: buildSlots(),

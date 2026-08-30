@@ -1,6 +1,6 @@
 {
   "name": "sowel-recipe-portal-night-closure",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Sowel recipe: guarantee the portal is closed for the night, despite a closed-contact sensor that misses the closure",
   "type": "module",
   "main": "dist/index.js",

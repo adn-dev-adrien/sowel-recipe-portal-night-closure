@@ -1,18 +1,19 @@
 {
   "id": "portal-night-closure",
   "type": "recipe",
-  "name": "Portal Night Closure",
-  "version": "0.1.0",
+  "name": "Automatic Evening Portal Closure",
+  "version": "0.1.1",
   "description": "Makes sure the portal is closed for the night, at a chosen hour — on an installation whose only sensor is a closed-contact that sometimes misses the closure.",
   "icon": "DoorClosed",
+  "category": "safety",
   "repo": "adn-dev-adrien/sowel-recipe-portal-night-closure",
   "author": "adn-dev-adrien",
   "tags": ["portal", "night", "closure", "security", "automation"],
   "i18n": {
     "fr": {
-      "name": "Fermeture du portail la nuit",
+      "name": "Fermeture automatique de portail en soirée",
       "description": "S'assure que le portail est fermé pour la nuit, à l'heure choisie — sur une installation dont le seul capteur est un contact de fermeture qui rate parfois la détection."
     }
   },
-  "sowelVersion": ">=1.35.0"
+  "sowelVersion": ">=1.36.0"
 }

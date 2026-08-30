@@ -1,0 +1,19 @@
+{
+  "name": "sowel-recipe-portal-night-closure",
+  "version": "0.1.0",
+  "description": "Sowel recipe: guarantee the portal is closed for the night, despite a closed-contact sensor that misses the closure",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.1.9"
+  },
+  "license": "AGPL-3.0"
+}

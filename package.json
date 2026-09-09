@@ -1,7 +1,7 @@
 {
   "name": "sowel-recipe-portal-night-closure",
-  "version": "0.1.1",
-  "description": "Sowel recipe: guarantee the portal is closed for the night, despite a closed-contact sensor that misses the closure",
+  "version": "0.2.0",
+  "description": "Closes the portal on its own: an armable mode that re-closes after every opening, plus the guaranteed evening closure — on an installation whose only sensor is a closed-contact that sometimes misses the closure.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

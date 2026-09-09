@@ -1,7 +1,18 @@
 // ============================================================
-// Portal Night Closure — external Sowel recipe
+// Automatic Portal Closure — external Sowel recipe
 //
-// One job: at a chosen hour, every evening, make sure the portal is closed.
+// Two ways of asking for the same thing — a portal that does not stay open:
+//
+//   • an ARMED MODE. While it is on, every opening — the remote, the keypad,
+//     a delivery, whoever — starts a grace delay and ends in a closure. It is
+//     switched from the Dashboard tile, or on a schedule.
+//   • the EVENING CLOSURE, at a chosen hour: the portal is closed for the
+//     night, whether or not anyone thought about it.
+//
+// Both feed ONE watcher, on purpose. On a portal driven by an impulse that
+// toggles, two automations each holding their own deadline send two impulses
+// for one opening: the first closes, the second re-opens. One watcher, one
+// pending closure, is the only shape that cannot do that.
 //
 // The installation this is written for has a single closed-contact sensor,
 // and that sensor lies in ONE direction: the portal often stops a couple of
@@ -55,9 +66,11 @@
 //         at 22:30 is usually a closed portal with a blind sensor), raises the
 //         alarm state, and keeps watching: a late contact clears it by itself.
 //
-// After the closing hour the recipe keeps an eye out until `watchUntil`: a
-// real opening (a closed → open edge) re-arms a closure after a grace delay,
-// so coming home at midnight does not leave the portal open till morning.
+// The grace delay is the same in both jobs: whoever just opened the portal is
+// given `reopenGrace` before it closes again. After the closing hour the recipe
+// keeps an eye out until `watchUntil`, so coming home at midnight does not
+// leave the portal open till morning; with the mode armed it watches all day
+// too. The pending closure feeds a live countdown on the row and on the tile.
 //
 // Orders are sent on decisions only — a manual command in between is never
 // overridden until the next decision.
@@ -86,6 +99,8 @@ interface EquipmentLite {
   type?: string;
   dataBindings: DataBindingLite[];
   orderBindings: OrderBindingLite[];
+  /** Core spec 174: the deadline the engine itself holds on this equipment. */
+  timedAction?: { alias?: string; revertValue?: unknown; expiresAt?: string } | null;
 }
 
 interface RecipeContext {
@@ -165,8 +180,27 @@ interface RecipeLangPack {
   groups?: Record<string, string>;
 }
 
+interface RecipeActionDef {
+  id: string;
+  type: "cycle";
+  stateKey: string;
+  options: { value: string; label: string }[];
+}
+
+/** Opt-in Dashboard tile (core spec 169, >= 1.64.0). Ignored by older cores. */
+interface RecipeTileDef {
+  icon?: string;
+  summaryKey?: string;
+  countdownKey?: string;
+  actions?: string[];
+  confirm?: boolean;
+  confirmParam?: string;
+  confirmFrom?: string;
+}
+
 interface RecipeInstanceHandle {
   stop(): void;
+  onAction?(action: string, payload?: Record<string, unknown>): void;
 }
 
 interface RecipeDefinition {
@@ -174,6 +208,8 @@ interface RecipeDefinition {
   name: string;
   description: string;
   slots: RecipeSlotDef[];
+  actions?: RecipeActionDef[];
+  tile?: RecipeTileDef;
   i18n?: Record<string, RecipeLangPack>;
   validate(params: Record<string, unknown>, ctx: RecipeContext): void;
   createInstance(params: Record<string, unknown>, ctx: RecipeContext): RecipeInstanceHandle;
@@ -200,6 +236,14 @@ export type CommandMode = "pulse_toggle" | "pulse_autoclose" | "close_command";
 /** What to do when a `pulse_toggle` sequence ends without any confirmation. */
 export type DoubtPolicy = "restore" | "force_close" | "alert_only";
 
+/**
+ * The armed auto-closing mode: while it is on, EVERY opening — the remote, the
+ * keypad, a delivery, whoever — starts the grace delay and ends in a closure.
+ * It is on top of the nightly window, not instead of it: both feed the same
+ * single watcher, so the portal never receives two impulses for one opening.
+ */
+export type AutoCloseMode = "off" | "on";
+
 /** Margin added to the travel time before reading the contact back. */
 const CONFIRM_MARGIN_MS = 10_000;
 
@@ -207,6 +251,29 @@ const MODE_OPTIONS = [
   { value: "pulse_toggle", label: "Impulse (sequential toggle)" },
   { value: "pulse_autoclose", label: "Impulse + automatic re-closing" },
   { value: "close_command", label: "Dedicated close command" },
+];
+
+/**
+ * The mode is a plain on/off: a cycle action with two options is a toggle, and
+ * one click on the Dashboard tile flips it.
+ */
+const AUTO_CLOSE_OPTIONS = [
+  { value: "off", label: "Arrêt" },
+  { value: "on", label: "Armé" },
+];
+
+/**
+ * The grace is a short list rather than a free duration: it is read at a glance
+ * on a tile, and the four values below are the ones that make sense between
+ * "the visitor is still in the driveway" and "they have had time to leave".
+ * The values are duration strings, so an instance that already stored `10m`
+ * keeps working untouched.
+ */
+const GRACE_OPTIONS = [
+  { value: "1m", label: "1 minute" },
+  { value: "3m", label: "3 minutes" },
+  { value: "5m", label: "5 minutes" },
+  { value: "10m", label: "10 minutes" },
 ];
 
 const DOUBT_OPTIONS = [
@@ -255,6 +322,10 @@ export function readAttempts(value: unknown, fallback = 2): number {
 
 export function readMode(value: unknown): CommandMode {
   return value === "pulse_autoclose" || value === "close_command" ? value : "pulse_toggle";
+}
+
+export function readAutoCloseMode(value: unknown): AutoCloseMode {
+  return value === "on" ? "on" : "off";
 }
 
 export function readDoubtPolicy(value: unknown): DoubtPolicy {
@@ -329,13 +400,34 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "reopenGrace",
-      name: "Grace after a re-opening",
+      name: "Delay before re-closing",
       description:
-        "Delay left to whoever just opened the portal during the night before it is closed again",
-      type: "duration",
+        "Time left to whoever just opened the portal before it is closed again. Used by the armed mode and by the night watch alike.",
+      type: "select",
       required: false,
       defaultValue: "10m",
+      options: GRACE_OPTIONS,
       group: "schedule",
+    },
+    {
+      id: "autoCloseFrom",
+      name: "Arm the mode at",
+      description:
+        "Switch the automatic closing mode on at this time, every day. Leave empty to only arm it by hand from the Dashboard.",
+      type: "time",
+      required: false,
+      defaultValue: "",
+      group: "autoclose",
+    },
+    {
+      id: "autoCloseUntil",
+      name: "Disarm the mode at",
+      description:
+        "Switch the mode back off at this time. Leave empty to leave it armed until you switch it off yourself.",
+      type: "time",
+      required: false,
+      defaultValue: "",
+      group: "autoclose",
     },
     {
       id: "commandMode",
@@ -418,9 +510,9 @@ function buildSlots(): RecipeSlotDef[] {
 // ============================================================
 
 const FR: RecipeLangPack = {
-  name: "Fermeture automatique de portail en soirée",
+  name: "Fermeture automatique de portail",
   description:
-    "S'assure que le portail est fermé pour la nuit, à l'heure choisie — sur une installation dont le seul capteur est un contact de fermeture qui rate parfois la détection.",
+    "Referme le portail tout seul : un mode armable qui referme après chaque ouverture, et la fermeture garantie du soir — sur une installation dont le seul capteur est un contact de fermeture qui rate parfois la détection.",
   slots: {
     zone: { name: "Zone", description: "Zone dans laquelle la recette rend compte" },
     portal: { name: "Portail", description: "Le portail à fermer pour la nuit" },
@@ -434,9 +526,25 @@ const FR: RecipeLangPack = {
         "Continue la surveillance après l'heure de fermeture : un portail réellement ouvert pendant la nuit est refermé. Vide = n'agir qu'à l'heure de fermeture.",
     },
     reopenGrace: {
-      name: "Délai après une réouverture",
+      name: "Délai avant refermeture",
       description:
-        "Temps laissé à celui qui vient d'ouvrir le portail pendant la nuit avant de le refermer",
+        "Temps laissé à celui qui vient d'ouvrir le portail avant de le refermer. Sert au mode armé comme à la veille de nuit.",
+      options: {
+        "1m": "1 minute",
+        "3m": "3 minutes",
+        "5m": "5 minutes",
+        "10m": "10 minutes",
+      },
+    },
+    autoCloseFrom: {
+      name: "Armer le mode à",
+      description:
+        "Active le mode fermeture automatique à cette heure, tous les jours. Vide = le mode ne s'arme qu'à la main, depuis le tableau de bord.",
+    },
+    autoCloseUntil: {
+      name: "Désarmer le mode à",
+      description:
+        "Coupe le mode à cette heure. Vide = le mode reste armé jusqu'à ce que vous le coupiez vous-même.",
     },
     commandMode: {
       name: "Ce que fait la commande du portail",
@@ -480,7 +588,12 @@ const FR: RecipeLangPack = {
       },
     },
   },
-  groups: { schedule: "Horaires", command: "Commande du portail", doubt: "En cas de doute" },
+  groups: {
+    schedule: "Horaires",
+    autoclose: "Mode fermeture automatique",
+    command: "Commande du portail",
+    doubt: "En cas de doute",
+  },
 };
 
 // ============================================================
@@ -489,11 +602,37 @@ const FR: RecipeLangPack = {
 
 export function createRecipe(): RecipeDefinition {
   return {
+    // The id is deliberately unchanged: instances are stored by recipe id, so
+    // renaming it would strand the installed one. The recipe grew a second job,
+    // it did not become a different recipe.
     id: "portal-night-closure",
-    name: "Automatic Evening Portal Closure",
+    name: "Automatic Portal Closure",
     description:
-      "Makes sure the portal is closed for the night, at a chosen hour — on an installation whose only sensor is a closed-contact that sometimes misses the closure.",
+      "Closes the portal on its own: an armable mode that re-closes after every opening, plus the guaranteed evening closure — on an installation whose only sensor is a closed-contact that sometimes misses the closure.",
     slots: buildSlots(),
+
+    actions: [
+      {
+        id: "set_auto_close",
+        type: "cycle",
+        stateKey: "autoClose",
+        options: AUTO_CLOSE_OPTIONS,
+      },
+    ],
+
+    // Dashboard tile (core spec 169). Two options on the cycle action make it a
+    // toggle: one click anywhere on the card arms or disarms the mode.
+    //
+    // No `confirm` / `confirmFrom` here, on purpose. Those guard a click that
+    // MOVES the equipment; this one only arms a watch, and nothing leaves for
+    // the portal until it is opened and the grace runs out. Deriving the guard
+    // from the portal (whose "Confirmation before action" is on) would demand a
+    // slide every time the mode is switched, for a click that moves nothing.
+    tile: {
+      icon: "DoorClosed",
+      actions: ["set_auto_close"],
+    },
+
     i18n: { fr: FR },
 
     validate(params, ctx) {
@@ -537,6 +676,22 @@ export function createRecipe(): RecipeDefinition {
             `Automatic re-closing delay: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+      }
+
+      for (const id of ["autoCloseFrom", "autoCloseUntil"] as const) {
+        const value = params[id];
+        if (value === undefined || value === "" || value === null) continue;
+        if (!isValidHHMM(value)) throw new Error(`${id} must be a valid HH:MM time, or empty`);
+      }
+      const armAt = isValidHHMM(params.autoCloseFrom) ? params.autoCloseFrom : null;
+      const disarmAt = isValidHHMM(params.autoCloseUntil) ? params.autoCloseUntil : null;
+      if (disarmAt !== null && armAt === null) {
+        // A disarm hour on its own would silently switch off a mode nothing
+        // ever switches on — the setting reads like an automation and is none.
+        throw new Error("A disarm time needs an arm time — set both, or neither");
+      }
+      if (armAt !== null && armAt === disarmAt) {
+        throw new Error("Arm and disarm times must differ");
       }
 
       if (params.reopenGrace !== undefined && params.reopenGrace !== "") {
@@ -584,6 +739,12 @@ export function createRecipe(): RecipeDefinition {
       const portalId = String(params.portal);
       const closingTime = String(params.closingTime);
       const watchUntil = isValidHHMM(params.watchUntil) ? (params.watchUntil as string) : null;
+      const autoCloseFrom = isValidHHMM(params.autoCloseFrom)
+        ? (params.autoCloseFrom as string)
+        : null;
+      const autoCloseUntil = isValidHHMM(params.autoCloseUntil)
+        ? (params.autoCloseUntil as string)
+        : null;
       const mode = readMode(params.commandMode);
       const doubtPolicy = readDoubtPolicy(params.doubtPolicy);
       const attempts = readAttempts(params.attempts);
@@ -608,8 +769,12 @@ export function createRecipe(): RecipeDefinition {
       let sequenceRunning = false;
       let awaitingConfirmation = false;
 
+      let autoClose: AutoCloseMode = "off";
+
       let dailyTimer: ReturnType<typeof setTimeout> | null = null;
       let watchEndTimer: ReturnType<typeof setTimeout> | null = null;
+      let armTimer: ReturnType<typeof setTimeout> | null = null;
+      let disarmTimer: ReturnType<typeof setTimeout> | null = null;
       let reopenTimer: ReturnType<typeof setTimeout> | null = null;
       let sleepTimer: ReturnType<typeof setTimeout> | null = null;
       let sleepResolve: (() => void) | null = null;
@@ -644,22 +809,60 @@ export function createRecipe(): RecipeDefinition {
         return portalStateOf(ctx.equipmentManager.getByIdWithDetails(portalId));
       }
 
+      function graceLabel(): string {
+        return ctx.helpers.formatDuration(reopenGraceMs);
+      }
+
       function publish(): void {
         ctx.state.set("belief", belief);
         ctx.state.set("confirmed", confirmed);
         ctx.state.set("portalState", lastSensor);
+        ctx.state.set("autoClose", autoClose);
+        ctx.state.set("summary", summaryLine());
       }
 
       function setAlarm(on: boolean): void {
         ctx.state.set("alarm", on);
+        // The summary reads the alarm, and several callers raise it *after*
+        // publishing — refresh it here so the line is never a step behind.
+        ctx.state.set("summary", summaryLine());
       }
 
       function nightWatchActive(now: Date = new Date()): boolean {
         return watchUntil !== null && inWindow(closingTime, watchUntil, now);
       }
 
+      /**
+       * The single predicate that decides whether an opening is watched. The
+       * armed mode and the nightly window both answer it, which is precisely
+       * why there is one watcher and never two impulses for one opening.
+       */
+      function watchActive(now: Date = new Date()): boolean {
+        return autoClose === "on" || nightWatchActive(now);
+      }
+
       function refreshStatus(): void {
-        ctx.state.set("status", nightWatchActive() ? "watching" : "idle");
+        ctx.state.set("status", watchActive() ? "watching" : "idle");
+      }
+
+      /** The one line the recipe row and the Dashboard tile show. */
+      function summaryLine(): string {
+        if (ctx.state.get("alarm") === true) return "État incertain — vérifiez le portail";
+        if (sequenceRunning) return "Fermeture en cours…";
+        const place =
+          belief === "closed"
+            ? confirmed
+              ? "Fermé"
+              : "Réputé fermé"
+            : belief === "open"
+              ? "Ouvert"
+              : "État inconnu";
+        // A pending closure already has the countdown next to it: the line says
+        // what is happening, the countdown says when.
+        if (reopenTimer) return `${place} — refermeture automatique`;
+        if (autoClose === "on") return `${place} — mode armé, refermeture ${graceLabel()} après ouverture`;
+        if (nightWatchActive()) return `${place} — veille de nuit, refermeture ${graceLabel()} après ouverture`;
+        return `${place} — mode au repos, fermeture à ${closingTime}`;
       }
 
       // ── Beliefs ──
@@ -670,12 +873,10 @@ export function createRecipe(): RecipeDefinition {
         belief = "closed";
         confirmed = true;
         ctx.state.set("lastConfirmedAt", new Date().toISOString());
+        // Cancel before publishing: the summary reads the pending timer.
+        clearReopen();
         setAlarm(false);
         publish();
-        if (reopenTimer) {
-          clearTimeout(reopenTimer);
-          reopenTimer = null;
-        }
         if (clearing) ctx.log(`${portalName()} : fermeture confirmée par le capteur, alerte levée`);
         if (awaitingConfirmation) cancelSleep();
       }
@@ -912,25 +1113,143 @@ export function createRecipe(): RecipeDefinition {
           belief = "doubt";
           publish();
         }
-        ctx.state.set("status", "idle");
+        // Not a bare "idle": the armed mode outlives the night window.
+        refreshStatus();
+      }
+
+      /**
+       * The deadline the CORE holds on this portal (spec 174, "open for 15 min"
+       * from the equipment's own tile), if any.
+       *
+       * It sends the very same impulse this recipe would. The core cannot see
+       * ours and stand down — its rule 2 needs a mirror binding, and a gate's
+       * sequential impulse has none, as its own code says. So the recipe is the
+       * one that gives way: two deadlines on one opening means the first closes
+       * the portal and the second RE-OPENS it.
+       *
+       * Giving way is also the right answer on the merits: "open for 15 minutes"
+       * is an explicit request, made just now, by a person. The standing mode is
+       * a default. The explicit one wins.
+       */
+      function coreDeadline(): string | null {
+        const details = ctx.equipmentManager.getByIdWithDetails(portalId);
+        const expiresAt = details?.timedAction?.expiresAt;
+        return typeof expiresAt === "string" ? expiresAt : null;
+      }
+
+      function clearReopen(): void {
+        if (reopenTimer) {
+          clearTimeout(reopenTimer);
+          reopenTimer = null;
+        }
+        ctx.state.set("timerExpiresAt", null);
       }
 
       function armReopen(): void {
-        if (reopenTimer) clearTimeout(reopenTimer);
+        const armedByMode = autoClose === "on";
+        clearReopen();
+
+        const core = coreDeadline();
+        if (core !== null) {
+          publish();
+          ctx.log(
+            `${portalName()} ouvert — la minuterie du portail est déjà armée (échéance ${core}), la recette la laisse fermer`,
+          );
+          return;
+        }
+
         reopenTimer = setTimeout(() => {
           reopenTimer = null;
-          if (stopped || !nightWatchActive()) return;
+          ctx.state.set("timerExpiresAt", null);
+          // Re-checked at the deadline, not only when arming: the mode may have
+          // been switched off, or the night watch ended, in between.
+          if (stopped || !watchActive()) {
+            publish();
+            return;
+          }
+          // Re-checked here too: the portal's own timer may have been armed
+          // from its tile after this closure was scheduled.
+          const core = coreDeadline();
+          if (core !== null) {
+            publish();
+            ctx.log(
+              `${portalName()} : minuterie du portail armée entre-temps (échéance ${core}) — la recette la laisse fermer`,
+            );
+            return;
+          }
           if (readPortal() === "closed") {
             markConfirmedClosed();
             return;
           }
-          runClosure("Portail rouvert pendant la nuit", true).catch((err) =>
+          // Read now, not at arming time: the mode may have been switched off
+          // while the night watch kept the closure alive, and the journal
+          // should name the reason that actually survived.
+          runClosure(
+            autoClose === "on" ? "Mode fermeture automatique" : "Portail rouvert pendant la nuit",
+            true,
+          ).catch((err) =>
             ctx.logger.error({ err }, "portal-night-closure: re-closing sequence failed"),
           );
         }, reopenGraceMs);
+        // Feeds the amber countdown on the recipe row and on the tile.
+        ctx.state.set("timerExpiresAt", new Date(Date.now() + reopenGraceMs).toISOString());
+        publish();
         ctx.log(
-          `${portalName()} ouvert pendant la nuit — fermeture dans ${ctx.helpers.formatDuration(reopenGraceMs)}`,
+          `${portalName()} ouvert (${armedByMode ? "mode armé" : "veille de nuit"}) — fermeture dans ${graceLabel()}`,
         );
+      }
+
+      // ── The armed mode ──
+
+      /**
+       * The one writer of the mode. The pill, the schedule and the restart all
+       * come through here, so arming means the same thing whoever asked.
+       */
+      function setAutoClose(next: AutoCloseMode, source: string): void {
+        if (next === autoClose) return;
+        autoClose = next;
+
+        if (next === "on") {
+          ctx.log(
+            `Mode fermeture automatique armé (${source}) — refermeture ${graceLabel()} après chaque ouverture`,
+          );
+          // Arming on a portal already open: act only on the certainty of an
+          // observed opening. A bare "open" contact may be a closed portal
+          // short of its reed, and an impulse on that one would OPEN it.
+          if (belief === "open" && !sequenceRunning && !reopenTimer) armReopen();
+          else publish();
+        } else {
+          // The night watch is a second reason to be watching: only drop a
+          // pending closure if the mode was the only thing holding it.
+          const dropping = reopenTimer !== null && !nightWatchActive();
+          if (dropping) clearReopen();
+          ctx.log(
+            `Mode fermeture automatique coupé (${source})` +
+              (dropping ? " — refermeture en attente annulée" : ""),
+          );
+          publish();
+        }
+        refreshStatus();
+      }
+
+      function armAutoCloseOn(): void {
+        if (!autoCloseFrom) return;
+        if (armTimer) clearTimeout(armTimer);
+        armTimer = setTimeout(() => {
+          armTimer = null;
+          if (!stopped) setAutoClose("on", `programmation ${autoCloseFrom}`);
+          armAutoCloseOn();
+        }, msUntilTime(autoCloseFrom));
+      }
+
+      function armAutoCloseOff(): void {
+        if (!autoCloseUntil) return;
+        if (disarmTimer) clearTimeout(disarmTimer);
+        disarmTimer = setTimeout(() => {
+          disarmTimer = null;
+          if (!stopped) setAutoClose("off", `programmation ${autoCloseUntil}`);
+          armAutoCloseOff();
+        }, msUntilTime(autoCloseUntil));
       }
 
       // ── Sensor ──
@@ -953,7 +1272,7 @@ export function createRecipe(): RecipeDefinition {
           belief = "open";
           confirmed = false;
           publish();
-          if (nightWatchActive() && !sequenceRunning) armReopen();
+          if (watchActive() && !sequenceRunning) armReopen();
         } else {
           publish();
         }
@@ -972,9 +1291,25 @@ export function createRecipe(): RecipeDefinition {
         belief = ctx.state.get("belief") === "open" ? "open" : "doubt";
         confirmed = false;
       }
+
+      // The mode survives a restart. A schedule outranks what was persisted:
+      // inside its window, the mode belongs on whatever a restart lost.
+      autoClose = readAutoCloseMode(ctx.state.get("autoClose"));
+      if (autoCloseFrom && autoCloseUntil && inWindow(autoCloseFrom, autoCloseUntil)) {
+        autoClose = "on";
+      }
+
+      // No closure is armed here, even on a portal reading open with the mode
+      // on. Arming from the pill is a deliberate gesture, made by someone in
+      // front of the portal; a restart is not, and an impulse nobody asked for
+      // at 3 a.m. would be the worst thing this recipe could do. The next real
+      // opening is what re-arms it.
       publish();
       if (ctx.state.get("alarm") !== true) setAlarm(false);
       refreshStatus();
+      // Never inherited: a stale deadline would render a countdown for a timer
+      // that no longer exists.
+      ctx.state.set("timerExpiresAt", null);
       for (const key of ["lastClosureAt", "lastConfirmedAt", "pulses", "attempt"]) {
         if (ctx.state.get(key) === null || ctx.state.get(key) === undefined) {
           ctx.state.set(key, null);
@@ -983,6 +1318,8 @@ export function createRecipe(): RecipeDefinition {
 
       armDaily();
       armWatchEnd();
+      armAutoCloseOn();
+      armAutoCloseOff();
 
       const unsub = ctx.eventBus.onType("equipment.data.changed", (event) => {
         if (event.equipmentId !== portalId) return;
@@ -994,6 +1331,9 @@ export function createRecipe(): RecipeDefinition {
       ctx.log(
         `Recette démarrée : ${portalName()} fermé à ${closingTime}` +
           (watchUntil ? `, surveillé jusqu'à ${watchUntil}` : "") +
+          ` — mode fermeture automatique ${autoClose === "on" ? "armé" : "au repos"}` +
+          (autoCloseFrom ? ` (programmé ${autoCloseFrom}${autoCloseUntil ? `→${autoCloseUntil}` : ""})` : "") +
+          `, refermeture ${graceLabel()} après ouverture` +
           ` — ${commandLabel()}, capteur actuellement « ${initial} »`,
       );
 
@@ -1003,13 +1343,23 @@ export function createRecipe(): RecipeDefinition {
           if (dailyTimer) clearTimeout(dailyTimer);
           if (watchEndTimer) clearTimeout(watchEndTimer);
           if (reopenTimer) clearTimeout(reopenTimer);
+          if (armTimer) clearTimeout(armTimer);
+          if (disarmTimer) clearTimeout(disarmTimer);
           dailyTimer = null;
           watchEndTimer = null;
           reopenTimer = null;
+          armTimer = null;
+          disarmTimer = null;
           cancelSleep();
           unsub();
           ctx.state.set("status", "idle");
+          ctx.state.set("timerExpiresAt", null);
           ctx.log("Recette arrêtée — le portail n'est pas manœuvré");
+        },
+
+        onAction(action: string, payload?: Record<string, unknown>): void {
+          if (action !== "set_auto_close") return;
+          setAutoClose(readAutoCloseMode(payload?.mode), "tableau de bord");
         },
       };
     },

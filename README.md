@@ -2,7 +2,14 @@
 
 > **Publier une version** : bumper `manifest.json` + `package.json`, committer, puis `git tag vX.Y.Z && git push origin vX.Y.Z`. Le workflow `Release` teste, build, empaquette et crée la release GitHub. Ne pas lancer `gh release create` à la main : la commande crée aussi le tag, ce qui déclenche le workflow, qui trouverait alors sa propre release déjà là et échouerait.
 
-Recette Sowel qui garantit que le **portail est fermé pour la nuit**, à une heure choisie, sur une installation dont le seul retour est un **contact de fermeture qui rate parfois la détection** — le portail s'arrête deux ou trois centimètres avant le capteur, il est fermé, et le capteur dit « ouvert ».
+Recette Sowel qui **referme le portail toute seule**, sur une installation dont le seul retour est un **contact de fermeture qui rate parfois la détection** — le portail s'arrête deux ou trois centimètres avant le capteur, il est fermé, et le capteur dit « ouvert ».
+
+Elle répond à la même demande de deux façons :
+
+- un **mode fermeture automatique** armable — tant qu'il est armé, **chaque** ouverture (télécommande, clavier, livreur, peu importe) déclenche un délai puis une refermeture. Il s'arme d'un clic sur la tuile du tableau de bord, ou tout seul à des heures programmées ;
+- la **fermeture du soir**, à l'heure choisie, que quelqu'un y ait pensé ou non.
+
+> **Un seul veilleur pour les deux.** C'est délibéré : sur un portail à impulsion séquentielle, deux automatismes qui tiennent chacun leur échéance envoient **deux** impulsions pour une seule ouverture — la première ferme, la seconde rouvre. Une seule refermeture en attente à la fois est la seule forme qui ne peut pas faire ça.
 
 ## L'asymétrie, qui est tout le sujet
 
@@ -74,6 +81,30 @@ Si la platine est en mode automatique (elle referme seule après un délai), une
 
 Dans ces deux modes, une fermeture non confirmée par le capteur **ne lève pas d'alerte** : la manœuvre est la garantie, le silence du contact n'est qu'un défaut de capteur. Le journal le dit (`portail réputé fermé, capteur à recaler`) et l'état `confirmed` reste à `false`.
 
+## Le mode fermeture automatique
+
+La pastille de la tuile fait tout : **Arrêt** ↔ **Armé**, un clic. Tant qu'il est armé, un front `fermé → ouvert` déclenche le délai `reopenGrace`, et à l'échéance le portail est refermé — avec exactement le même raisonnement que la fermeture du soir (jamais d'impulsion à l'aveugle, relecture du capteur, tentatives bornées).
+
+Le mode **reste armé après une refermeture** : l'ouverture suivante est traitée pareil. Il n'y a rien à réarmer.
+
+Il s'arme aussi tout seul, si vous renseignez `autoCloseFrom` / `autoCloseUntil` (par exemple 08:00 → 20:00). La pastille et la programmation écrivent le même réglage : une coupure manuelle tient jusqu'à la prochaine heure programmée, pas au-delà. Laissez les deux vides pour ne piloter le mode qu'à la main.
+
+Trois précautions qui comptent :
+
+- **Armer le mode ne manœuvre jamais le portail.** C'est pour ça que la tuile ne demande pas de confirmation : le clic n'ouvre ni ne ferme rien, il arme une veille.
+- **Armer au-dessus d'un portail déjà ouvert** ne lance le décompte que si la recette a **vu** l'ouverture (conviction `open`). Sur un simple « ouvert » du contact sans front observé (conviction `doubt`), elle ne bouge pas : une impulsion là-dessus pourrait *ouvrir* un portail fermé.
+- **Un redémarrage ne lance jamais de refermeture**, même mode armé et portail ouvert. Armer depuis la tuile est un geste de quelqu'un qui est devant le portail ; un redémarrage du moteur ne l'est pas, et une impulsion que personne n'a demandée à 3 h du matin serait le pire de ce que cette recette peut faire. C'est la prochaine vraie ouverture qui réarme.
+
+Pendant l'attente, un **décompte à la seconde** s'affiche sur la ligne de l'instance et sur la tuile. Si le portail se referme tout seul entre-temps, la refermeture est annulée.
+
+### La recette cède à la minuterie du portail
+
+Si le cœur tient déjà sa propre échéance sur ce portail — la minuterie « ouvrir pour 15 min » de la tuile de l'équipement, spec 174 — **la recette n'en arme pas une seconde** et laisse le cœur fermer.
+
+Ce n'est pas une politesse, c'est une nécessité. Les deux échéances envoient la **même** impulsion : la première ferme le portail, la seconde le **rouvre**. Et le cœur ne peut pas nous voir pour se désarmer tout seul — sa règle « retour fait à la main » exige une mesure miroir sur l'alias de l'ordre, ce qu'une impulsion séquentielle de portail n'a pas, son propre code le dit. C'est donc à la recette de céder.
+
+Sur le fond aussi, c'est le bon choix : « ouvrir pour 15 minutes » est une demande explicite, faite à l'instant, par quelqu'un. Le mode armé est un réglage par défaut. L'explicite l'emporte. La vérification est refaite à l'échéance, au cas où la minuterie du portail serait armée après coup.
+
 ## La surveillance de nuit
 
 Fermer à 22 h 30 ne suffit pas à passer la nuit fermé. Entre `closingTime` et `watchUntil` (06:00 par défaut), une **vraie** ouverture — un front `fermé → ouvert`, donc une information fiable — réarme une fermeture après `reopenGrace` (10 min par défaut, le temps de rentrer la voiture et de décharger le coffre). Si le portail se referme tout seul pendant ce délai, la fermeture est annulée.
@@ -91,7 +122,9 @@ Au matin (`watchUntil`), une fermeture non confirmée **ne survit pas à la nuit
 | `portal` | — | Le portail (équipement de type `gate`, choisissable dans n'importe quelle zone) |
 | `closingTime` | `22:30` | L'heure à laquelle le portail doit être fermé, tous les soirs |
 | `watchUntil` | `06:00` | Fin de la surveillance de nuit. Vide = n'agir qu'à l'heure de fermeture |
-| `reopenGrace` | `10m` | Délai laissé à celui qui vient d'ouvrir avant de refermer |
+| `reopenGrace` | `10m` | Délai laissé à celui qui vient d'ouvrir avant de refermer — **1, 3, 5 ou 10 min**. Sert au mode armé comme à la veille de nuit |
+| `autoCloseFrom` | — | Heure d'armement automatique du mode. Vide = mode piloté à la main |
+| `autoCloseUntil` | — | Heure de désarmement. Vide = le mode reste armé jusqu'à ce que vous le coupiez |
 | `commandMode` | `pulse_toggle` | Ce que fait la commande : impulsion qui bascule / impulsion + refermeture auto / commande de fermeture dédiée |
 | `closeCommandAlias` | `command` | Alias de la commande « fermer » (mode dédié) |
 | `closeCommandValue` | — | Valeur envoyée (mode dédié). Vide = valeur par défaut de la liaison |
@@ -112,6 +145,9 @@ Ces clés d'état sont lisibles dans la fiche de l'instance, et utilisables comm
 | `belief` | `closed` / `open` / `doubt` | Ce que la recette croit, par opposition à ce que dit le capteur |
 | `confirmed` | `true` / `false` | La dernière fermeture a-t-elle été confirmée par le contact |
 | `portalState` | `open` / `closed` / `unknown` | Le capteur, brut |
+| `autoClose` | `off` / `on` | L'état du mode — c'est la pastille cliquable |
+| `summary` | texte | La ligne de résumé affichée sous le nom de l'instance et sur la tuile |
+| `timerExpiresAt` | ISO-8601 / `null` | Échéance de la refermeture en attente — c'est le décompte |
 | `status` | `idle` / `closing` / `watching` | Où en est la recette |
 | `nextClosing` | `HH:MM` | Prochaine fermeture |
 | `lastClosureAt`, `lastConfirmedAt`, `pulses`, `attempt` | | Traçabilité de la dernière séquence |
@@ -120,8 +156,10 @@ Ces clés d'état sont lisibles dans la fiche de l'instance, et utilisables comm
 
 ## Comportement
 
-- Les ordres ne partent que sur **décision** (heure de fermeture, réouverture constatée) : une commande manuelle entre deux n'est jamais écrasée.
+- Les ordres ne partent que sur **décision** (heure de fermeture, réouverture constatée mode armé ou nuit) : une commande manuelle entre deux n'est jamais écrasée.
+- Couper le mode annule la refermeture en attente — **sauf** si la veille de nuit la réclame aussi : elle n'est pas coupée par la pastille.
 - `stop()` (instance désactivée, paramètres modifiés, mise à jour de la recette, arrêt du moteur) annule tous les minuteurs et **interrompt une séquence en cours** — le portail n'est pas manœuvré.
+- Le mode survit à un redémarrage, mais **jamais un décompte** : une échéance périmée afficherait un compte à rebours qui ne mène nulle part. Une plage horaire l'emporte sur l'état persisté — redémarrer dans la plage revient armé.
 - Au redémarrage : si le contact dit « fermé », c'est une certitude et la recette repart de là. Sinon une conviction `open` persistée (une ouverture réellement observée) est conservée, une conviction `closed` jamais confirmée est oubliée.
 - Les fronts sont dédupliqués : le bus republie `equipment.data.changed` avec des valeurs inchangées, et l'état dérivé du portail arrive toujours avec `previous: undefined`.
 - Un `unknown` (l'état d'attente que Sowel pose après une commande de portail) n'est jamais pris pour une information.

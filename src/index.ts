@@ -766,6 +766,10 @@ export function createRecipe(): RecipeDefinition {
       let belief: Belief = "doubt";
       let confirmed = false;
       let lastSensor: PortalState = "unknown";
+      // The last thing the contact said for sure. Sowel parks the state on
+      // `unknown` while any command it sent is in flight, so an opening asked
+      // from a phone or a tile reads closed → unknown → open.
+      let lastSettled: PortalState = "unknown";
       let sequenceRunning = false;
       let awaitingConfirmation = false;
 
@@ -925,6 +929,7 @@ export function createRecipe(): RecipeDefinition {
         if (stopped) return { sent, confirmed: false };
         const state = readPortal();
         lastSensor = state;
+        if (state !== "unknown") lastSettled = state;
         publish();
         return { sent, confirmed: state === "closed" };
       }
@@ -940,6 +945,7 @@ export function createRecipe(): RecipeDefinition {
 
         const state = readPortal();
         lastSensor = state;
+        if (state !== "unknown") lastSettled = state;
         if (state === "closed") {
           markConfirmedClosed();
           refreshStatus();
@@ -1255,9 +1261,10 @@ export function createRecipe(): RecipeDefinition {
       // ── Sensor ──
 
       function onPortalState(next: PortalState): void {
-        const previous = lastSensor;
-        if (next === previous) return; // the bus re-fires unchanged values
+        if (next === lastSensor) return; // the bus re-fires unchanged values
         lastSensor = next;
+        const settled = lastSettled;
+        if (next !== "unknown") lastSettled = next;
         ctx.state.set("portalState", next);
 
         if (next === "closed") {
@@ -1265,10 +1272,10 @@ export function createRecipe(): RecipeDefinition {
           return;
         }
 
-        // A closed → open edge is the one opening this hardware reports
-        // truthfully. Anything else (open → unknown → open around our own
-        // commands) says nothing at all.
-        if (next === "open" && previous === "closed") {
+        // Closed → open is the one opening this hardware reports truthfully,
+        // with or without Sowel's `unknown` in between. Open → unknown → open
+        // (around our own commands) says nothing at all.
+        if (next === "open" && settled === "closed") {
           belief = "open";
           confirmed = false;
           publish();
@@ -1282,6 +1289,7 @@ export function createRecipe(): RecipeDefinition {
 
       const initial = readPortal();
       lastSensor = initial;
+      lastSettled = initial;
       if (initial === "closed") {
         belief = "closed";
         confirmed = true;

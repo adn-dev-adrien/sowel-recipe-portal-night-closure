@@ -728,6 +728,37 @@ describe("auto-closing mode", () => {
     instance.stop();
   });
 
+  it("closes an opening that Sowel itself commanded (phone, tile, shared access)", async () => {
+    const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+    const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+    arm(instance);
+
+    // What the core does on any command it sends to a gate: the state goes
+    // `unknown` until the contact answers, so the edge is closed → unknown → open.
+    h.setSensor("unknown");
+    await settle(2_000);
+    h.openPortal();
+    expect(h.state.get("timerExpiresAt")).not.toBeNull();
+
+    await settle(11 * 60_000);
+    expect(h.orderCalls).toHaveLength(1);
+    expect(h.physicalState()).toBe("closed");
+    instance.stop();
+  });
+
+  it("still reads open → unknown → open as no opening at all", async () => {
+    const h = buildCtx({ physical: "open", detectsAfter: Infinity });
+    const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+    arm(instance);
+
+    h.setSensor("unknown");
+    h.setSensor("open");
+    expect(h.state.get("timerExpiresAt")).toBeNull();
+    await settle(30 * 60_000);
+    expect(h.orderCalls).toHaveLength(0);
+    instance.stop();
+  });
+
   it("feeds the countdown while a closure is pending, and clears it after", async () => {
     const h = buildCtx({ physical: "closed", detectsAfter: 0 });
     const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);

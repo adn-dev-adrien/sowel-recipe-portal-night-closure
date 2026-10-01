@@ -2,7 +2,7 @@
   "id": "portal-night-closure",
   "type": "recipe",
   "name": "Automatic Portal Closure",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Closes the portal on its own: an armable mode that re-closes after every opening, plus the guaranteed evening closure — on an installation whose only sensor is a closed-contact that sometimes misses the closure.",
   "icon": "DoorClosed",
   "category": "safety",

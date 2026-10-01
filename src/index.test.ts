@@ -926,6 +926,23 @@ describe("auto-closing mode", () => {
     instance.stop();
   });
 
+  it("gives way to the delivery timer when the opening goes through Sowel's unknown", async () => {
+    const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+    const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+    arm(instance);
+
+    // The timed tile: the core arms its deadline and sends the pulse, so the
+    // contact reads closed → unknown → open, now an opening the recipe sees.
+    h.setCoreTimedAction("2026-08-29T20:15:00.000Z");
+    h.setSensor("unknown");
+    h.openPortal();
+    await settle(40 * 60_000);
+
+    expect(h.state.get("timerExpiresAt")).toBeNull();
+    expect(h.orderCalls).toHaveLength(0); // left open for the delivery, the core closes it
+    instance.stop();
+  });
+
   it("gives way even when the portal's timer is armed after ours", async () => {
     const h = buildCtx({ physical: "closed", detectsAfter: 0 });
     const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);

@@ -65,6 +65,10 @@
 //         back where it started — the default, because a portal that reads open
 //         at 22:30 is usually a closed portal with a blind sensor), raises the
 //         alarm state, and keeps watching: a late contact clears it by itself.
+//       – when it saw the opening and still gets no confirmation, it cannot tell
+//         a lost impulse from a closure short of the reed. Another impulse would
+//         re-open the second, so once its sequence is over it sends no more, says
+//         so and raises the alarm.
 //
 // The grace delay is the same in both jobs: whoever just opened the portal is
 // given `reopenGrace` before it closes again. After the closing hour the recipe
@@ -851,8 +855,9 @@ export function createRecipe(): RecipeDefinition {
 
       /** The one line the recipe row and the Dashboard tile show. */
       function summaryLine(): string {
-        if (ctx.state.get("alarm") === true) return "État incertain — vérifiez le portail";
+        // First: whoever reads the tile should know the portal is about to move.
         if (sequenceRunning) return "Fermeture en cours…";
+        if (ctx.state.get("alarm") === true) return "État incertain — vérifiez le portail";
         const place =
           belief === "closed"
             ? confirmed
@@ -966,8 +971,12 @@ export function createRecipe(): RecipeDefinition {
           return;
         }
 
+        // This sequence replaces any closure still pending: left armed, that one
+        // would fire on top of it and flip the portal again.
+        clearReopen();
         sequenceRunning = true;
         ctx.state.set("status", "closing");
+        publish();
         ctx.log(
           `${reason} : ${confident || isSafeCommandMode(mode) ? "fermeture" : "recalage"} du ${portalName()} — ${commandLabel()}, ${attempts} tentative(s) max`,
         );
@@ -1021,7 +1030,10 @@ export function createRecipe(): RecipeDefinition {
         } finally {
           sequenceRunning = false;
           awaitingConfirmation = false;
-          if (!stopped) refreshStatus();
+          if (!stopped) {
+            publish();
+            refreshStatus();
+          }
         }
       }
 
@@ -1053,10 +1065,24 @@ export function createRecipe(): RecipeDefinition {
           return;
         }
 
+        // An impulse that toggles guarantees nothing: it may never have reached the
+        // controller, or the portal may have stopped short of the reed.
+        if (mode === "pulse_toggle" && confident) {
+          belief = "doubt";
+          confirmed = false;
+          publish();
+          setAlarm(true);
+          ctx.log(
+            `${portalName()} : aucune confirmation après ${pulses} manœuvre(s) — ouvert ou fermé sans que le capteur le voie, vérifiez le portail`,
+            "warn",
+          );
+          return;
+        }
+
         // A close-only command (or an impulse on a controller that re-closes on
         // its own) means "close" whatever the portal was doing: the manoeuvre is
         // the guarantee, the silent contact is only a sensor fault.
-        if (isSafeCommandMode(mode) || confident) {
+        if (isSafeCommandMode(mode)) {
           belief = "closed";
           confirmed = false;
           publish();
@@ -1119,6 +1145,7 @@ export function createRecipe(): RecipeDefinition {
           belief = "doubt";
           publish();
         }
+        publish();
         // Not a bare "idle": the armed mode outlives the night window.
         refreshStatus();
       }
@@ -1313,7 +1340,8 @@ export function createRecipe(): RecipeDefinition {
       // at 3 a.m. would be the worst thing this recipe could do. The next real
       // opening is what re-arms it.
       publish();
-      if (ctx.state.get("alarm") !== true) setAlarm(false);
+      // A closed contact settles a persisted alarm: the bus will not repeat it.
+      if (initial === "closed" || ctx.state.get("alarm") !== true) setAlarm(false);
       refreshStatus();
       // Never inherited: a stale deadline would render a countdown for a timer
       // that no longer exists.

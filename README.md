@@ -41,6 +41,12 @@ C'est une ambiguïté de parité, et elle est irréductible avec ce matériel : 
 
 Si elle a **vu** l'ouverture (front `fermé → ouvert`), elle sait que le portail est ouvert : l'impulsion le ferme, sans pari. C'est le cas nominal d'une soirée normale — le portail était fermé et confirmé, quelqu'un l'ouvre, la recette le voit.
 
+### Quand une fermeture n'est pas confirmée
+
+Après une ouverture observée, la recette envoie sa séquence (`attempts` impulsions, plus une si besoin pour finir sur une fermeture). Si le contact dit encore « ouvert » à la fin, deux cas restent possibles : les impulsions n'ont pas eu d'effet, ou le portail s'est fermé trop court. Une impulsion de plus rouvrirait le second. La recette s'arrête donc là : elle lève l'alerte et affiche « État incertain — vérifiez le portail ». Le contact qui passe à « fermé » lève l'alerte.
+
+La fermeture du soir repart alors du doute : elle suit `doubtPolicy` et ne garantit pas la fermeture (rien n'est envoyé avec `alert_only`).
+
 ### Quand elle doute : le recalage borné
 
 Si le contact dit « ouvert » depuis un moment sans front observé (typiquement : une fermeture précédente que le capteur n'a jamais vue), la recette lance une séquence bornée :

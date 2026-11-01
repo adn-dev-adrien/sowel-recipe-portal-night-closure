@@ -43,7 +43,9 @@ Si elle a **vu** l'ouverture (front `fermé → ouvert`), elle sait que le porta
 
 ### Quand une fermeture n'est pas confirmée
 
-Après une ouverture observée, la recette envoie sa séquence. Si le contact dit encore « ouvert » à la fin, deux cas restent possibles : l'impulsion n'a pas eu d'effet, ou le portail s'est fermé trop court. Une impulsion de plus rouvrirait le second. La recette n'en envoie donc pas : elle lève l'alerte et affiche « État incertain — vérifiez le portail ». Le contact qui passe à « fermé » lève l'alerte, et la fermeture du soir refait un recalage.
+Après une ouverture observée, la recette envoie sa séquence (`attempts` impulsions, plus une si besoin pour finir sur une fermeture). Si le contact dit encore « ouvert » à la fin, deux cas restent possibles : les impulsions n'ont pas eu d'effet, ou le portail s'est fermé trop court. Une impulsion de plus rouvrirait le second. La recette s'arrête donc là : elle lève l'alerte et affiche « État incertain — vérifiez le portail ». Le contact qui passe à « fermé » lève l'alerte.
+
+La fermeture du soir repart alors du doute : elle suit `doubtPolicy` et ne garantit pas la fermeture (rien n'est envoyé avec `alert_only`).
 
 ### Quand elle doute : le recalage borné
 

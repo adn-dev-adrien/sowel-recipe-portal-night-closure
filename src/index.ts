@@ -67,7 +67,8 @@
 //         alarm state, and keeps watching: a late contact clears it by itself.
 //       – when it saw the opening and still gets no confirmation, it cannot tell
 //         a lost impulse from a closure short of the reed. Another impulse would
-//         re-open the second, so it sends none, says so and raises the alarm.
+//         re-open the second, so once its sequence is over it sends no more, says
+//         so and raises the alarm.
 //
 // The grace delay is the same in both jobs: whoever just opened the portal is
 // given `reopenGrace` before it closes again. After the closing hour the recipe
@@ -854,8 +855,9 @@ export function createRecipe(): RecipeDefinition {
 
       /** The one line the recipe row and the Dashboard tile show. */
       function summaryLine(): string {
-        if (ctx.state.get("alarm") === true) return "État incertain — vérifiez le portail";
+        // First: whoever reads the tile should know the portal is about to move.
         if (sequenceRunning) return "Fermeture en cours…";
+        if (ctx.state.get("alarm") === true) return "État incertain — vérifiez le portail";
         const place =
           belief === "closed"
             ? confirmed
@@ -969,8 +971,12 @@ export function createRecipe(): RecipeDefinition {
           return;
         }
 
+        // This sequence replaces any closure still pending: left armed, that one
+        // would fire on top of it and flip the portal again.
+        clearReopen();
         sequenceRunning = true;
         ctx.state.set("status", "closing");
+        publish();
         ctx.log(
           `${reason} : ${confident || isSafeCommandMode(mode) ? "fermeture" : "recalage"} du ${portalName()} — ${commandLabel()}, ${attempts} tentative(s) max`,
         );
@@ -1139,6 +1145,7 @@ export function createRecipe(): RecipeDefinition {
           belief = "doubt";
           publish();
         }
+        publish();
         // Not a bare "idle": the armed mode outlives the night window.
         refreshStatus();
       }
@@ -1333,7 +1340,8 @@ export function createRecipe(): RecipeDefinition {
       // at 3 a.m. would be the worst thing this recipe could do. The next real
       // opening is what re-arms it.
       publish();
-      if (ctx.state.get("alarm") !== true) setAlarm(false);
+      // A closed contact settles a persisted alarm: the bus will not repeat it.
+      if (initial === "closed" || ctx.state.get("alarm") !== true) setAlarm(false);
       refreshStatus();
       // Never inherited: a stale deadline would render a countdown for a timer
       // that no longer exists.

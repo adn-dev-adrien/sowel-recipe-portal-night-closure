@@ -780,7 +780,7 @@ describe("auto-closing mode", () => {
       instance.stop();
     });
 
-    it("never re-opens a portal that stopped short of the reed", async () => {
+    it("adds no impulse after its sequence on a portal short of the reed", async () => {
       const h = buildCtx({ physical: "closed", detectsAfter: Infinity });
       const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
       arm(instance);
@@ -808,6 +808,40 @@ describe("auto-closing mode", () => {
       expect(h.state.get("alarm")).toBe(false);
       expect(h.state.get("belief")).toBe("closed");
       expect(h.state.get("confirmed")).toBe(true);
+      instance.stop();
+    });
+
+    it("does not fire a pending closure on top of the evening sequence", async () => {
+      vi.setSystemTime(new Date("2026-08-29T22:25:00"));
+      const h = buildCtx({ physical: "closed", detectsAfter: Infinity });
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      arm(instance);
+      h.openPortal(); // grace runs to 22:35, the evening closure comes first
+
+      await settle(30 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      expect(h.physicalState()).toBe("closed");
+      expect(h.state.get("timerExpiresAt")).toBeNull();
+      instance.stop();
+    });
+
+    it("shows the closing line while the portal moves, even under an alarm", async () => {
+      const h = buildCtx({ physical: "closed", detectsAfter: Infinity });
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      h.state.set("alarm", true);
+      arm(instance);
+      h.openPortal();
+      await settle(10 * 60_000 + 1000);
+      expect(h.orderCalls).toHaveLength(1);
+      expect(h.state.get("summary")).toBe("Fermeture en cours…");
+      instance.stop();
+    });
+
+    it("drops a persisted alarm when it starts on a closed contact", () => {
+      const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+      h.state.set("alarm", true);
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      expect(h.state.get("alarm")).toBe(false);
       instance.stop();
     });
 

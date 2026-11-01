@@ -36,6 +36,7 @@ function buildCtx(options: {
   let sensor: PortalState = physical === "closed" ? "closed" : "open";
   let closingsSoFar = 0;
   let coreTimedAction: { expiresAt: string } | null = null;
+  let deaf = false;
   const detectsAfter = options.detectsAfter ?? Infinity;
 
   const orderCalls: OrderCall[] = [];
@@ -113,7 +114,7 @@ function buildCtx(options: {
     },
     dispatchOrder: async (equipmentId: string, alias: string, value: unknown) => {
       orderCalls.push({ equipmentId, alias, value });
-      if (alias === "command") toggle();
+      if (alias === "command" && !deaf) toggle();
       return { success: true };
     },
   };
@@ -129,6 +130,10 @@ function buildCtx(options: {
     setSensor: (value: PortalState) => {
       sensor = value;
       emitState(value);
+    },
+    /** Orders leave Sowel but never reach the controller: a lost radio frame. */
+    setDeaf: (value: boolean) => {
+      deaf = value;
     },
     /** The core's own timed action (spec 174), armed from the portal's tile. */
     setCoreTimedAction: (expiresAt: string | null) => {
@@ -744,6 +749,98 @@ describe("auto-closing mode", () => {
     expect(h.orderCalls).toHaveLength(1);
     expect(h.physicalState()).toBe("closed");
     instance.stop();
+  });
+
+  describe("a closure that does not take", () => {
+    // Far enough from the grace delay for the whole retry run to fit before it.
+    const PARAMS = { ...BASE_PARAMS, closingTime: "23:50" };
+    const GRACE_AND_SEQUENCE = 10 * 60_000 + 3 * 50_000 + 1000;
+
+    async function failedClosure() {
+      const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+      const instance = createRecipe().createInstance(PARAMS, h.ctx as never);
+      arm(instance);
+      h.setDeaf(true);
+      h.openPortal();
+      await settle(GRACE_AND_SEQUENCE);
+      expect(h.orderCalls).toHaveLength(3); // 2 attempts + the levelling impulse
+      return { h, instance };
+    }
+
+    it("believes the contact instead of calling the portal closed", async () => {
+      const { h, instance } = await failedClosure();
+      expect(h.state.get("belief")).toBe("open");
+      expect(h.state.get("alarm")).toBe(true);
+      expect(h.state.get("summary")).toBe("Ouvert — fermeture non confirmée, nouvel essai");
+      expect(h.state.get("timerExpiresAt")).not.toBeNull();
+      expect(h.logLines.some((l) => l.includes("réputé fermé"))).toBe(false);
+      instance.stop();
+    });
+
+    it("closes on the next impulse that gets through, and lifts the alarm", async () => {
+      const { h, instance } = await failedClosure();
+      await settle(2 * 60_000 + 50_000);
+      expect(h.orderCalls).toHaveLength(4); // first retry, lost as well
+      h.setDeaf(false);
+      await settle(5 * 60_000 + 50_000);
+      expect(h.orderCalls).toHaveLength(5);
+      expect(h.physicalState()).toBe("closed");
+      expect(h.state.get("belief")).toBe("closed");
+      expect(h.state.get("confirmed")).toBe(true);
+      expect(h.state.get("alarm")).toBe(false);
+      expect(h.state.get("timerExpiresAt")).toBeNull();
+      await settle(30 * 60_000);
+      expect(h.orderCalls).toHaveLength(5); // and it stops there
+      instance.stop();
+    });
+
+    it("gives up after a bounded number of impulses, alarm still raised", async () => {
+      const { h, instance } = await failedClosure();
+      await settle(127 * 60_000 + 6 * 50_000);
+      expect(h.orderCalls).toHaveLength(9);
+      expect(h.state.get("alarm")).toBe(true);
+      expect(h.state.get("timerExpiresAt")).toBeNull();
+      expect(h.state.get("summary")).toBe("État incertain — vérifiez le portail");
+      expect(h.logLines.some((l) => l.includes("abandon"))).toBe(true);
+      instance.stop();
+    });
+
+    it("stops as soon as someone closes the portal by hand", async () => {
+      const { h, instance } = await failedClosure();
+      h.setSensor("closed");
+      expect(h.state.get("alarm")).toBe(false);
+      await settle(60 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      instance.stop();
+    });
+
+    it("switching the mode off drops the retries", async () => {
+      const { h, instance } = await failedClosure();
+      disarm(instance);
+      expect(h.state.get("timerExpiresAt")).toBeNull();
+      await settle(60 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      instance.stop();
+    });
+
+    it("gives way to the portal's own timer", async () => {
+      const { h, instance } = await failedClosure();
+      h.setCoreTimedAction(new Date(Date.now() + 15 * 60_000).toISOString());
+      await settle(10 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      instance.stop();
+    });
+
+    it("skips a slot while another order is in flight", async () => {
+      const { h, instance } = await failedClosure();
+      h.setSensor("unknown");
+      await settle(3 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      h.setSensor("open");
+      await settle(5 * 60_000);
+      expect(h.orderCalls).toHaveLength(4);
+      instance.stop();
+    });
   });
 
   it("still reads open → unknown → open as no opening at all", async () => {

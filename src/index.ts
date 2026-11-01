@@ -65,6 +65,10 @@
 //         back where it started — the default, because a portal that reads open
 //         at 22:30 is usually a closed portal with a blind sensor), raises the
 //         alarm state, and keeps watching: a late contact clears it by itself.
+//       – when it saw the opening, the contact has just proved it works, so
+//         "still open" is believed: the closure failed (a lost radio frame, a
+//         refusal from the controller). It tries again, one impulse at a time,
+//         on a bounded schedule, rather than calling the portal closed.
 //
 // The grace delay is the same in both jobs: whoever just opened the portal is
 // given `reopenGrace` before it closes again. After the closing hour the recipe
@@ -246,6 +250,10 @@ export type AutoCloseMode = "off" | "on";
 
 /** Margin added to the travel time before reading the contact back. */
 const CONFIRM_MARGIN_MS = 10_000;
+// Pauses before each further impulse when an observed opening would not close.
+// An even count on purpose: should the contact ever go blind with every impulse
+// landing, the whole run still ends on a closing manoeuvre.
+const CLOSURE_RETRY_DELAYS_MS = [2, 5, 10, 20, 30, 60].map((min) => min * 60_000);
 
 const MODE_OPTIONS = [
   { value: "pulse_toggle", label: "Impulse (sequential toggle)" },
@@ -780,6 +788,8 @@ export function createRecipe(): RecipeDefinition {
       let armTimer: ReturnType<typeof setTimeout> | null = null;
       let disarmTimer: ReturnType<typeof setTimeout> | null = null;
       let reopenTimer: ReturnType<typeof setTimeout> | null = null;
+      let retryTimer: ReturnType<typeof setTimeout> | null = null;
+      let retriesDone = 0;
       let sleepTimer: ReturnType<typeof setTimeout> | null = null;
       let sleepResolve: (() => void) | null = null;
 
@@ -851,6 +861,8 @@ export function createRecipe(): RecipeDefinition {
 
       /** The one line the recipe row and the Dashboard tile show. */
       function summaryLine(): string {
+        if (sequenceRunning && retriesDone > 0) return "Fermeture en cours…";
+        if (retryTimer) return "Ouvert — fermeture non confirmée, nouvel essai";
         if (ctx.state.get("alarm") === true) return "État incertain — vérifiez le portail";
         if (sequenceRunning) return "Fermeture en cours…";
         const place =
@@ -877,8 +889,10 @@ export function createRecipe(): RecipeDefinition {
         belief = "closed";
         confirmed = true;
         ctx.state.set("lastConfirmedAt", new Date().toISOString());
-        // Cancel before publishing: the summary reads the pending timer.
+        // Cancel before publishing: the summary reads the pending timers.
         clearReopen();
+        clearRetry();
+        retriesDone = 0;
         setAlarm(false);
         publish();
         if (clearing) ctx.log(`${portalName()} : fermeture confirmée par le capteur, alerte levée`);
@@ -942,6 +956,8 @@ export function createRecipe(): RecipeDefinition {
        */
       async function runClosure(reason: string, confident: boolean): Promise<void> {
         if (sequenceRunning || stopped) return;
+        clearRetry();
+        retriesDone = 0;
 
         const state = readPortal();
         lastSensor = state;
@@ -1021,7 +1037,10 @@ export function createRecipe(): RecipeDefinition {
         } finally {
           sequenceRunning = false;
           awaitingConfirmation = false;
-          if (!stopped) refreshStatus();
+          if (!stopped) {
+            publish();
+            refreshStatus();
+          }
         }
       }
 
@@ -1053,10 +1072,26 @@ export function createRecipe(): RecipeDefinition {
           return;
         }
 
+        // An impulse that toggles, on an opening the contact reported itself: the
+        // contact works, so "open" means open. Nothing guarantees the impulses
+        // ever reached the controller, and calling the portal closed would leave
+        // it open until the evening.
+        if (mode === "pulse_toggle" && confident) {
+          belief = "open";
+          confirmed = false;
+          setAlarm(true);
+          ctx.log(
+            `${portalName()} : toujours ouvert après ${pulses} manœuvre(s) — les ordres ne sont pas suivis d'effet`,
+            "warn",
+          );
+          armRetry();
+          return;
+        }
+
         // A close-only command (or an impulse on a controller that re-closes on
         // its own) means "close" whatever the portal was doing: the manoeuvre is
         // the guarantee, the silent contact is only a sensor fault.
-        if (isSafeCommandMode(mode) || confident) {
+        if (isSafeCommandMode(mode)) {
           belief = "closed";
           confirmed = false;
           publish();
@@ -1083,6 +1118,96 @@ export function createRecipe(): RecipeDefinition {
               : `${portalName()} : aucune confirmation après ${pulses} manœuvre(s) — le portail a été remis dans son état initial, vérifiez-le`,
           "warn",
         );
+      }
+
+      // ── Retrying a closure that did not take ──
+
+      function clearRetry(): void {
+        if (retryTimer) {
+          clearTimeout(retryTimer);
+          retryTimer = null;
+          ctx.state.set("timerExpiresAt", null);
+        }
+      }
+
+      function armRetry(): void {
+        clearRetry();
+        if (retriesDone >= CLOSURE_RETRY_DELAYS_MS.length) {
+          publish();
+          ctx.log(
+            `${portalName()} : toujours ouvert après ${retriesDone} nouveaux essais — abandon, vérifiez le portail`,
+            "error",
+          );
+          return;
+        }
+        const delay = CLOSURE_RETRY_DELAYS_MS[retriesDone];
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          ctx.state.set("timerExpiresAt", null);
+          retryClosure().catch((err) =>
+            ctx.logger.error({ err }, "portal-night-closure: closing retry failed"),
+          );
+        }, delay);
+        ctx.state.set("timerExpiresAt", new Date(Date.now() + delay).toISOString());
+        publish();
+        ctx.log(
+          `${portalName()} : nouvel essai ${retriesDone + 1}/${CLOSURE_RETRY_DELAYS_MS.length} dans ${ctx.helpers.formatDuration(delay)}`,
+        );
+      }
+
+      /** One more impulse, with every reason not to send it checked again first. */
+      async function retryClosure(): Promise<void> {
+        if (stopped || sequenceRunning) return;
+        // The mode was switched off in between: nobody wants this closure any more.
+        // The evening closure still picks the portal up.
+        if (!watchActive()) {
+          publish();
+          refreshStatus();
+          return;
+        }
+        const core = coreDeadline();
+        if (core !== null) {
+          publish();
+          ctx.log(
+            `${portalName()} : minuterie du portail armée entre-temps (échéance ${core}) — la recette la laisse fermer`,
+          );
+          return;
+        }
+        const state = readPortal();
+        lastSensor = state;
+        if (state === "closed") {
+          markConfirmedClosed();
+          refreshStatus();
+          return;
+        }
+        retriesDone++;
+        // Sowel parks the state on `unknown` while someone else's order is in
+        // flight. An impulse now could stop that manoeuvre: this slot is skipped.
+        if (state !== "open") {
+          armRetry();
+          return;
+        }
+
+        sequenceRunning = true;
+        ctx.state.set("status", "closing");
+        publish();
+        let success = false;
+        try {
+          const result = await manoeuvre();
+          success = result.confirmed;
+          if (stopped) return;
+          const pulses = Number(ctx.state.get("pulses") ?? 0) + (result.sent ? 1 : 0);
+          ctx.state.set("pulses", pulses);
+          if (success) finish({ success, pulses, dispatched: true, confident: true });
+        } finally {
+          sequenceRunning = false;
+          awaitingConfirmation = false;
+          if (!stopped) {
+            if (!success) armRetry();
+            publish();
+            refreshStatus();
+          }
+        }
       }
 
       // ── Schedule ──
@@ -1222,13 +1347,16 @@ export function createRecipe(): RecipeDefinition {
           // Arming on a portal already open: act only on the certainty of an
           // observed opening. A bare "open" contact may be a closed portal
           // short of its reed, and an impulse on that one would OPEN it.
-          if (belief === "open" && !sequenceRunning && !reopenTimer) armReopen();
+          if (belief === "open" && !sequenceRunning && !reopenTimer && !retryTimer) armReopen();
           else publish();
         } else {
           // The night watch is a second reason to be watching: only drop a
           // pending closure if the mode was the only thing holding it.
-          const dropping = reopenTimer !== null && !nightWatchActive();
-          if (dropping) clearReopen();
+          const dropping = (reopenTimer !== null || retryTimer !== null) && !nightWatchActive();
+          if (dropping) {
+            clearReopen();
+            clearRetry();
+          }
           ctx.log(
             `Mode fermeture automatique coupé (${source})` +
               (dropping ? " — refermeture en attente annulée" : ""),
@@ -1351,11 +1479,13 @@ export function createRecipe(): RecipeDefinition {
           if (dailyTimer) clearTimeout(dailyTimer);
           if (watchEndTimer) clearTimeout(watchEndTimer);
           if (reopenTimer) clearTimeout(reopenTimer);
+          if (retryTimer) clearTimeout(retryTimer);
           if (armTimer) clearTimeout(armTimer);
           if (disarmTimer) clearTimeout(disarmTimer);
           dailyTimer = null;
           watchEndTimer = null;
           reopenTimer = null;
+          retryTimer = null;
           armTimer = null;
           disarmTimer = null;
           cancelSleep();

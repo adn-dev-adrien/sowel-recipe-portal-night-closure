@@ -41,6 +41,10 @@ C'est une ambiguïté de parité, et elle est irréductible avec ce matériel : 
 
 Si elle a **vu** l'ouverture (front `fermé → ouvert`), elle sait que le portail est ouvert : l'impulsion le ferme, sans pari. C'est le cas nominal d'une soirée normale — le portail était fermé et confirmé, quelqu'un l'ouvre, la recette le voit.
 
+### Quand la fermeture ne prend pas
+
+Après une ouverture observée, le contact vient de prouver qu'il fonctionne : s'il dit encore « ouvert » après la séquence, le portail est ouvert. La recette ne le déclare donc pas « réputé fermé ». Elle lève l'alerte et renvoie **une impulsion à la fois**, après 2, 5, 10, 20, 30 puis 60 minutes, avec un décompte sur la tuile. Elle s'arrête dès que le contact dit « fermé », si le mode est coupé, ou si la minuterie du portail est armée. Au bout de ces six essais, l'alerte reste affichée.
+
 ### Quand elle doute : le recalage borné
 
 Si le contact dit « ouvert » depuis un moment sans front observé (typiquement : une fermeture précédente que le capteur n'a jamais vue), la recette lance une séquence bornée :

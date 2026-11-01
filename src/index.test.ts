@@ -36,6 +36,7 @@ function buildCtx(options: {
   let sensor: PortalState = physical === "closed" ? "closed" : "open";
   let closingsSoFar = 0;
   let coreTimedAction: { expiresAt: string } | null = null;
+  let deaf = false;
   const detectsAfter = options.detectsAfter ?? Infinity;
 
   const orderCalls: OrderCall[] = [];
@@ -113,7 +114,7 @@ function buildCtx(options: {
     },
     dispatchOrder: async (equipmentId: string, alias: string, value: unknown) => {
       orderCalls.push({ equipmentId, alias, value });
-      if (alias === "command") toggle();
+      if (alias === "command" && !deaf) toggle();
       return { success: true };
     },
   };
@@ -129,6 +130,10 @@ function buildCtx(options: {
     setSensor: (value: PortalState) => {
       sensor = value;
       emitState(value);
+    },
+    /** Orders leave Sowel but never reach the controller: a lost radio frame. */
+    setDeaf: (value: boolean) => {
+      deaf = value;
     },
     /** The core's own timed action (spec 174), armed from the portal's tile. */
     setCoreTimedAction: (expiresAt: string | null) => {
@@ -744,6 +749,77 @@ describe("auto-closing mode", () => {
     expect(h.orderCalls).toHaveLength(1);
     expect(h.physicalState()).toBe("closed");
     instance.stop();
+  });
+
+  describe("a closure nothing confirms", () => {
+    const GRACE_AND_SEQUENCE = 10 * 60_000 + 3 * 50_000 + 1000;
+
+    function expectAlarmNoMoreImpulses(h: ReturnType<typeof buildCtx>): void {
+      expect(h.orderCalls).toHaveLength(3); // 2 attempts + the levelling impulse
+      expect(h.state.get("belief")).toBe("doubt");
+      expect(h.state.get("confirmed")).toBe(false);
+      expect(h.state.get("alarm")).toBe(true);
+      expect(h.state.get("summary")).toBe("État incertain — vérifiez le portail");
+      expect(h.logLines.some((l) => l.includes("réputé fermé"))).toBe(false);
+      expect(h.logLines.some((l) => l.includes("vérifiez le portail"))).toBe(true);
+    }
+
+    it("raises the alarm when the impulses were lost", async () => {
+      const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      arm(instance);
+      h.setDeaf(true);
+      h.openPortal();
+
+      await settle(GRACE_AND_SEQUENCE);
+      expectAlarmNoMoreImpulses(h);
+      expect(h.physicalState()).toBe("open");
+
+      await settle(60 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      instance.stop();
+    });
+
+    it("never re-opens a portal that stopped short of the reed", async () => {
+      const h = buildCtx({ physical: "closed", detectsAfter: Infinity });
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      arm(instance);
+      h.openPortal();
+
+      await settle(GRACE_AND_SEQUENCE);
+      expectAlarmNoMoreImpulses(h);
+      expect(h.physicalState()).toBe("closed");
+
+      await settle(60 * 60_000);
+      expect(h.orderCalls).toHaveLength(3);
+      expect(h.physicalState()).toBe("closed");
+      instance.stop();
+    });
+
+    it("lifts the alarm as soon as the contact reads closed", async () => {
+      const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      arm(instance);
+      h.setDeaf(true);
+      h.openPortal();
+      await settle(GRACE_AND_SEQUENCE);
+
+      h.setSensor("closed");
+      expect(h.state.get("alarm")).toBe(false);
+      expect(h.state.get("belief")).toBe("closed");
+      expect(h.state.get("confirmed")).toBe(true);
+      instance.stop();
+    });
+
+    it("leaves no summary stuck on the closing line", async () => {
+      const h = buildCtx({ physical: "closed", detectsAfter: 0 });
+      const instance = createRecipe().createInstance(BASE_PARAMS, h.ctx as never);
+      arm(instance);
+      h.openPortal();
+      await settle(GRACE_AND_SEQUENCE);
+      expect(h.state.get("summary")).not.toBe("Fermeture en cours…");
+      instance.stop();
+    });
   });
 
   it("still reads open → unknown → open as no opening at all", async () => {
